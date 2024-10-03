@@ -36,8 +36,8 @@ my $p = STDF::Parser->new( stdf => $fh , exclude_records => 'FTR,MPR,DTR,GDR' , 
 my $db = $dbfile;
 my $dsn = "dbi:Pg:dbname=$db;host=localhost";
 #my $dsn = "dbi:SQLite:dbname=$db";
-my $user = 'postgres';
-my $password = 'b641h46h';
+my $user = '';
+my $password = '';
 
 if($db =~ /\.db$/) {
 	$dsn = "dbi:SQLite:dbname=$db";
