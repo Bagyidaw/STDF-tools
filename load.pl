@@ -4,7 +4,7 @@ use warnings;
 
 
 ## Copyright Nyan 2024
-## Artistic License 2
+## GPL v3
 
 
 use IO::Uncompress::Gunzip qw($GunzipError);
