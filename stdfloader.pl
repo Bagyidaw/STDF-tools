@@ -15,6 +15,7 @@ use Data::Dumper;
 use DBI;
 use Time::Piece;
 use STDF::Parser;
+use MIME::Base64 qw(encode_base64);
 use File::Basename;
 
 my $SQLITE_TIMESTAMP_FMT = "%Y-%m-%d %H:%M:%S";
@@ -31,7 +32,7 @@ else {
 	open($fh,"<",$file) or die "Error opening $file:$!\n";
 	binmode($fh);
 }
-my $p = STDF::Parser->new( stdf => $fh , exclude_records => 'FTR,MPR,DTR,GDR' , omit_optional_fields => 1);
+my $p = STDF::Parser->new( stdf => $fh , exclude_records => 'FTR,DTR,GDR' , omit_optional_fields => 1);
 
 my $db = $dbfile;
 my $dsn = "dbi:Pg:dbname=$db;host=localhost";
@@ -166,23 +167,37 @@ my $prr_stmt = q{
 ## TEST EXECUTION RECORDS 
 
 my $ptr_stmt = q{
-	insert into ptr (part_id, test_num, test_flg, parm_flg, result, opt_flag, static_info_id )
-	   values       ( ? , ? , ? ,?, ? , ? , ? )
+	insert into ptr (part_id, test_flg, parm_flg, result, opt_flag,lo_limit,hi_limit, static_info_id )
+	   values       ( ?  , ? ,?, ? , ? , ? ,? , ?)
 };
 
+my $mpr_stmt = q {
+	insert into mpr (part_id, test_flg, parm_flg, rtn_icnt, rslt_cnt ,
+	                 rtn_stat, rtn_rslt , start_in , incr_in, rtn_indx,
+					 opt_flag , static_info_id) 
+			VALUEs  (  ? , ? , ? , ? ,  ? ,
+					   ? , ? , ? , ? ,  ? ,
+					   ? , ?
+					)
+};
 my $test_static_stmt = q{
-	insert into test_static_info ( stdf_id , test_txt, alarm_id, res_scal,
+	insert into test_static_info ( stdf_id ,test_num, test_txt, alarm_id, res_scal,
 				          llm_scal, hlm_scal, lo_limit, hi_limit, units,
-						  c_resfmt, c_llmfmt, c_hlmfmt , lo_spec, hi_spec)
+						  c_resfmt, c_llmfmt, c_hlmfmt , lo_spec, hi_spec,
+						  rtn_indx, start_in, incr_in, units_in
+						  )
 			values (       ?, ? , ? , ? , ? ,
 						   ? , ? , ? , ? , ?,
-						   ? , ? , ? , ? 
+						   ? , ? , ? , ? ,? ,
+						   ?,?,? , ?
 				)
 			
 };
 
 my $prr_sth = $dbh->prepare($prr_stmt);
 my $ptr_sth = $dbh->prepare($ptr_stmt);
+my $mpr_sth = $dbh->prepare($mpr_stmt);
+
 my $static_sth = $dbh->prepare($test_static_stmt);
 
 my $insert_time = localtime->strftime($SQLITE_TIMESTAMP_FMT);
@@ -199,6 +214,8 @@ $Data::Dumper::Indent = 0;       # turn off all pretty print
 my %ptr_info;   # PTR static data part 
 my %ptr_data;  # temporary store PTR related to current PRR
 my %ptr_default_data;  # store 1st PTR default values
+my %mpr_data;
+my %mpr_info;
 ## populate STDF name 
 ##                        STDF   
 ###                        |
@@ -223,6 +240,10 @@ while(my $r = $stream->()) {
 		# we do insertion of test execution data at part level (PRR)
 		#print "stor $head $site PTR\n";
 		push @{$ptr_data{$head,$site}},$r;
+	}
+	elsif($t eq "MPR" ) {
+	my ($head,$site) = @$r[2,3];
+		push @{$mpr_data{ $head,$site}},$r;
 	}
 	elsif($t eq "WCR" ){
 		my @wcr = @$r;
@@ -287,6 +308,7 @@ while(my $r = $stream->()) {
 		## use PIR to clear test execution data 
 		my ($h,$s) = @$r[1,2];
 		delete $ptr_data{$h,$s};
+		delete $mpr_data{$h,$s};
 	}
 	elsif($t eq "PRR") {
 		$r->[0] = $stdf_id;
@@ -299,12 +321,19 @@ while(my $r = $stream->()) {
 		if(!defined($last_prr_id)) { die "PRR insert error:\n"; }
 		my ($head,$site) = @$r[1,2];
 		my $ptr_ref = $ptr_data{$head,$site};
+		my $mpr_ref = $mpr_data{$head,$site};
 		#print "PTR for $head,$site\n";
-		if(!defined($ptr_ref)) { next; }
-		my @ptrs = @$ptr_ref;
+		my @ptrs;
+		my @mprs;
+		if(defined($ptr_ref)) {
+			@ptrs = @$ptr_ref;
+		}
+		if(defined($mpr_ref)) {
+			@mprs = @$mpr_ref;
+		}
 		
 		print "insert PTR for this Part $head,$site ", scalar(@ptrs),"\n";
-		
+		print "insert MPR for this part , " ,scalar(@mprs),"\n";
 		### test execution records insertion 
 		## 
 		## normalise these records optional semi-static in separate table to reduce space 
@@ -348,7 +377,7 @@ while(my $r = $stream->()) {
 			my $result = $ptr_field[6];
 			my $test_flg = $ptr_field[4];
 			my $parm_flg = $ptr_field[5];
-			
+			my ($dynamic_low_limit,$dynamic_hi_limit); # for dynamic test limits
 			#TEST_FLG bit 0 = 0 no alarm
 			# bit 1 = 0 value in result field is valid
 			# bit 2 = 0 test result is reliable
@@ -420,20 +449,83 @@ while(my $r = $stream->()) {
 						$same_hi_limit = 1;
 					}
 					$insert_static_data = !( $same_lo_limit && $same_hi_limit);
-					print "dynamic test limit\n" if($insert_static_data);
 				}
 				if($insert_static_data) {
-					my @static_fields = ($stdf_id,@ptr_field[7,8,10..20 ]);
+					my @static_fields = ($stdf_id,$test_num,@ptr_field[7,8,10..20 ],undef,undef,undef,undef);
 					#$dbh->do($test_static_stmt,undef,@static_fields);
 					$static_sth->execute(@static_fields);
 					my $inserted_id = $dbh->last_insert_id(undef,undef,'test_static_info',undef);
 					 $ptr_info{$test_num,$test_txt} = $inserted_id;
 					print "insert default for $test_num|$test_txt|$inserted_id \n";
+					$dynamic_low_limit = $lo_limit;
+					$dynamic_hi_limit  = $hi_limit;
 
 				}
 			}
-			$ptr_sth->execute($last_prr_id,@ptr_field[1,4,5,6,9],$ptr_info{$test_num,$test_txt});
+			$ptr_sth->execute($last_prr_id,@ptr_field[4,5,6,9],$dynamic_low_limit,$dynamic_hi_limit,$ptr_info{$test_num,$test_txt});
 			
+		}
+		
+		for my $mpr(@mprs) {
+			my @mpr_field = @$mpr;
+			my $test_num = $mpr_field[1];
+			my $test_txt = $mpr_field[10];
+			my $rtn_result = $mpr_field[9]; #could be empty ; type array ref
+			my $encoded_array ;
+			if(defined($rtn_result) && @$rtn_result) {
+				$encoded_array = encode_base64( pack("f<*",@$rtn_result) );
+			}
+			
+			if(@mpr_field > 12) {
+				my $opt_flag = $mpr_field[12];
+				my $res_scal = ($opt_flag & 0x01 ) ? undef : $mpr_field[13];
+				my $lo_spec  = ($opt_flag & 0x04 ) ? undef : $mpr_field[26];
+				my $hi_spec  = ($opt_flag & 0x08 ) ? undef : $mpr_field[27];
+				my ($lo_limit,$llm_scal,$hi_limit,$hlm_scal); # default undef
+				if( ($opt_flag & 0x50) == 0) { # bit 4,6 not set 
+					$lo_limit = $mpr_field[16];
+					$llm_scal = $mpr_field[14];
+				}
+				if( ($opt_flag & 0xA0) == 0) {  # bit 5,7 not set
+					$hi_limit = $mpr_field[17];
+					$hlm_scal = $mpr_field[15];
+				}
+				my $insert_static = 0;
+				unless(exists($mpr_info{$test_num,$test_txt})) {
+				# first default MPR 
+					$insert_static = 1;
+					#$mpr_default_data{$test_num,$test_txt} = [@mpr_field];
+				}
+				else {
+					# compare this with 1st MPR values 
+					## compare ON 
+					#  RES_SCAL, LLM_SCAL, HLM_SCAL 
+					#  LO_LIMIT, HI_LIMIT , START_IN,INCR_IN, UNITS 
+					$insert_static = 1;
+				}
+				if($insert_static) {
+					my $indx_arr = $mpr_field[20];
+					
+					my $rtn_indx;
+					if(defined($indx_arr) && @$indx_arr) {
+						$rtn_indx = encode_base64( pack("f<*",@$indx_arr));
+					}
+					my @static_fields = ($stdf_id,$test_num,$test_txt,
+					   @mpr_field[11,13,14,15,16,17,21,23,24,25,26,27],$rtn_indx, 
+					     @mpr_field[18,19,22]);
+					$static_sth->execute(@static_fields);
+					my $inserted_id = $dbh->last_insert_id(undef,undef,'test_static_info',undef);
+					$mpr_info{$test_num,$test_txt} = $inserted_id;
+				}
+				
+			
+			}
+			$mpr_sth->execute($last_prr_id,@mpr_field[4,5,6,7,8],$encoded_array,@mpr_field[18,19],undef,$mpr_field[12],
+				$mpr_info{$test_num,$test_txt});
+
+			
+			
+		
 		}
 	}
 		
