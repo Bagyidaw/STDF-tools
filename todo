@@ -1,0 +1,21 @@
+
+10/03/2024 
+add endian to STDF file information
+
+implement MPR, FTR 
+add DTR, BPS, EPS 
+
+
+Data access layer 
+
+classes 
+
+File Object
+Wafer Object
+Part Object
+Test - object 
+
+Merge 
+  - if Non Wafer Sort - based on lot ID, program, rev 
+  - if sort, based on lot ID, wafer id, program, rev
+  

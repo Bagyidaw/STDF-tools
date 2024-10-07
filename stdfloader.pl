@@ -216,6 +216,7 @@ my %ptr_data;  # temporary store PTR related to current PRR
 my %ptr_default_data;  # store 1st PTR default values
 my %mpr_data;
 my %mpr_info;
+my %mpr_default_data;
 ## populate STDF name 
 ##                        STDF   
 ###                        |
@@ -425,7 +426,8 @@ while(my $r = $stream->()) {
 				unless( exists($ptr_default_data{$test_num,$test_txt})) {
 					if(!defined($res_scal)) {
 						# something wrong here
-						die "1st PTR default value no RES_SCAL defined\n";
+						#print Dumper(\@ptr_field),"\n";
+						#die "1st PTR default value no RES_SCAL defined\n";
 					}
 					## wanna make sure all limits are set properly here 
 					$insert_static_data = 1;
@@ -475,8 +477,10 @@ while(my $r = $stream->()) {
 			if(defined($rtn_result) && @$rtn_result) {
 				$encoded_array = encode_base64( pack("f<*",@$rtn_result) );
 			}
-			
-			if(@mpr_field > 12) {
+			my $rtn_indx;
+
+			if(@mpr_field > 13) {
+			#	print "MPR got optional \n";
 				my $opt_flag = $mpr_field[12];
 				my $res_scal = ($opt_flag & 0x01 ) ? undef : $mpr_field[13];
 				my $lo_spec  = ($opt_flag & 0x04 ) ? undef : $mpr_field[26];
@@ -494,22 +498,45 @@ while(my $r = $stream->()) {
 				unless(exists($mpr_info{$test_num,$test_txt})) {
 				# first default MPR 
 					$insert_static = 1;
-					#$mpr_default_data{$test_num,$test_txt} = [@mpr_field];
+					$mpr_default_data{$test_num,$test_txt} = [@mpr_field];
 				}
 				else {
 					# compare this with 1st MPR values 
 					## compare ON 
 					#  RES_SCAL, LLM_SCAL, HLM_SCAL 
 					#  LO_LIMIT, HI_LIMIT , START_IN,INCR_IN, UNITS 
-					$insert_static = 1;
+					my $mpr_default = $mpr_default_data{$test_num,$test_txt};
+					my ($d_res_scal,$d_llm_scal,$d_hlm_scal) = @$mpr_default[13,14,15];
+					my ($d_lo_limit,$d_hi_limit) = @$mpr_default[16,17];
+					#print "NOT FIRST MPR!\n";
+					#my ($d_units,$d_units_in,$d_resfmt,$d_llmfmt,$d_hlmfmt) = @$mpr_result[21,22,23,24,25];
+
+					if(defined($res_scal) && $res_scal != $d_res_scal) { $insert_static = 1; print "why res\n";}
+					if(defined($llm_scal) && $llm_scal != $d_llm_scal) { $insert_static = 1; print "why lo\n";}
+					if(defined($hlm_scal) && $hlm_scal != $d_hlm_scal) { $insert_static = 1; print "why hil $hlm_scal vs $d_hlm_scal\n"; }
+					if(defined($hi_limit) && abs( $hi_limit - $d_hi_limit) > $EPS ) { $insert_static = 1; print "why hi lim\n";}
+					if(defined($lo_limit) && abs( $lo_limit - $d_lo_limit) > $EPS) { $insert_static = 1; print "why lo lim\n";}
+					for(21,22,23,24,25) {
+						if( defined($mpr_default->[$_]) && defined($mpr_field[$_]) && $mpr_default->[$_] ne $mpr_field[$_]) {
+							$insert_static = 1;
+							print "why field $_\n";
+							last;
+						}
+					}
+					#$insert_static = 1;
+					if($insert_static) {
+						#print "Default MPR" , Dumper($mpr_default), "\n";
+						#print "current MPR " , Dumper(\@mpr_field),"\n";
+					}
+				}
+
+				my $indx_arr = $mpr_field[20];
+					
+				if(defined($indx_arr) && @$indx_arr) {
+					$rtn_indx = encode_base64( pack("f<*",@$indx_arr));
 				}
 				if($insert_static) {
-					my $indx_arr = $mpr_field[20];
 					
-					my $rtn_indx;
-					if(defined($indx_arr) && @$indx_arr) {
-						$rtn_indx = encode_base64( pack("f<*",@$indx_arr));
-					}
 					my @static_fields = ($stdf_id,$test_num,$test_txt,
 					   @mpr_field[11,13,14,15,16,17,21,23,24,25,26,27],$rtn_indx, 
 					     @mpr_field[18,19,22]);
@@ -520,7 +547,7 @@ while(my $r = $stream->()) {
 				
 			
 			}
-			$mpr_sth->execute($last_prr_id,@mpr_field[4,5,6,7,8],$encoded_array,@mpr_field[18,19],undef,$mpr_field[12],
+			$mpr_sth->execute($last_prr_id,@mpr_field[4,5,6,7,8],$encoded_array,@mpr_field[18,19],$rtn_indx,$mpr_field[12],
 				$mpr_info{$test_num,$test_txt});
 
 			
