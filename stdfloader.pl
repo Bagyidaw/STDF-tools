@@ -32,7 +32,7 @@ else {
 	open($fh,"<",$file) or die "Error opening $file:$!\n";
 	binmode($fh);
 }
-my $p = STDF::Parser->new( stdf => $fh , exclude_records => 'FTR,DTR,GDR' , omit_optional_fields => 1);
+my $p = STDF::Parser->new( stdf => $fh , exclude_records => 'DTR,GDR' , omit_optional_fields => 1);
 
 my $db = $dbfile;
 my $dsn = "dbi:Pg:dbname=$db;host=localhost";
@@ -180,6 +180,31 @@ my $mpr_stmt = q {
 					   ? , ?
 					)
 };
+
+my $ftr_stmt = q {
+	insert into ftr ( part_id, test_flg, opt_flag, cycl_cnt, rel_vadr ,
+	                  rept_cnt, num_fail, xfail_ad, yfail_ad, vect_off ,
+					  rtn_icnt, pgm_icnt, rtn_indx, rtn_stat, pgm_indx,
+					  pgm_stat, fail_pin, vect_nam, time_set, op_code,
+					  test_txt, alarm_id, prog_txt, rslt_txt, patg_num , spin_map, static_info_id)
+				VALUES (
+					   ? , ? , ? , ? , ? ,
+					   ? , ? , ? , ? , ? ,
+					   ? , ? , ? , ? , ? ,
+					   ? , ? , ? , ? , ? ,
+					   ? , ? , ? , ? , ? , ? , ?
+				
+				)
+};
+
+my $ftr_static_stmt = q {
+	insert into test_static_info ( stdf_id, test_num ,vect_nam, time_set ,
+	                                op_code, test_txt, prog_txt, rslt_txt)
+						VALUES    (   ?  , ? , ? , ?,
+						               ? , ? ,?  , ?
+								)
+		
+};
 my $test_static_stmt = q{
 	insert into test_static_info ( stdf_id ,test_num, test_txt, alarm_id, res_scal,
 				          llm_scal, hlm_scal, lo_limit, hi_limit, units,
@@ -198,6 +223,8 @@ my $prr_sth = $dbh->prepare($prr_stmt);
 my $ptr_sth = $dbh->prepare($ptr_stmt);
 my $mpr_sth = $dbh->prepare($mpr_stmt);
 
+my $ftr_static_sth = $dbh->prepare($ftr_static_stmt);
+my $ftr_sth        = $dbh->prepare($ftr_stmt);
 my $static_sth = $dbh->prepare($test_static_stmt);
 
 my $insert_time = localtime->strftime($SQLITE_TIMESTAMP_FMT);
@@ -217,6 +244,9 @@ my %ptr_default_data;  # store 1st PTR default values
 my %mpr_data;
 my %mpr_info;
 my %mpr_default_data;
+my %ftr_data;
+my %ftr_default_data;
+my %ftr_info;
 ## populate STDF name 
 ##                        STDF   
 ###                        |
@@ -241,6 +271,10 @@ while(my $r = $stream->()) {
 		# we do insertion of test execution data at part level (PRR)
 		#print "stor $head $site PTR\n";
 		push @{$ptr_data{$head,$site}},$r;
+	}
+	elsif($t eq "FTR") {
+		my ($head,$site) = @$r[2,3];
+		push @{$ftr_data{$head,$site}},$r;
 	}
 	elsif($t eq "MPR" ) {
 	my ($head,$site) = @$r[2,3];
@@ -310,6 +344,7 @@ while(my $r = $stream->()) {
 		my ($h,$s) = @$r[1,2];
 		delete $ptr_data{$h,$s};
 		delete $mpr_data{$h,$s};
+		delete $ftr_data{$h,$s};
 	}
 	elsif($t eq "PRR") {
 		$r->[0] = $stdf_id;
@@ -323,18 +358,24 @@ while(my $r = $stream->()) {
 		my ($head,$site) = @$r[1,2];
 		my $ptr_ref = $ptr_data{$head,$site};
 		my $mpr_ref = $mpr_data{$head,$site};
+		my $ftr_ref = $ftr_data{$head,$site};
 		#print "PTR for $head,$site\n";
 		my @ptrs;
 		my @mprs;
+		my @ftrs;
 		if(defined($ptr_ref)) {
 			@ptrs = @$ptr_ref;
 		}
 		if(defined($mpr_ref)) {
 			@mprs = @$mpr_ref;
 		}
+		if(defined($ftr_ref)) {
+			@ftrs = @$ftr_ref;
+		}
 		
 		print "insert PTR for this Part $head,$site ", scalar(@ptrs),"\n";
 		print "insert MPR for this part , " ,scalar(@mprs),"\n";
+		print "insert FTR for this part , ", scalar(@ftrs),"\n";
 		### test execution records insertion 
 		## 
 		## normalise these records optional semi-static in separate table to reduce space 
@@ -388,8 +429,8 @@ while(my $r = $stream->()) {
 			# PARM_FLG bit 0 = 0 no scale error
 			# bit 1 = 0 no drift error
 			# bit 2 = 0 no oscillation
-			if( ($test_flg & 0x3E == 0) && 
-				($parm_flg & 0x06 == 0) ) {
+			if( ($test_flg & 0x3E) == 0 && 
+				($parm_flg & 0x06) == 0 ) {
 				
 				# result is valid 
 			} else {
@@ -475,7 +516,8 @@ while(my $r = $stream->()) {
 			my $rtn_result = $mpr_field[9]; #could be empty ; type array ref
 			my $encoded_array ;
 			if(defined($rtn_result) && @$rtn_result) {
-				$encoded_array = encode_base64( pack("f<*",@$rtn_result) );
+				#$encoded_array = encode_base64( pack("f<*",@$rtn_result) );
+				$encoded_array =  pack("f<*",@$rtn_result) ;
 			}
 			my $rtn_indx;
 
@@ -511,29 +553,22 @@ while(my $r = $stream->()) {
 					#print "NOT FIRST MPR!\n";
 					#my ($d_units,$d_units_in,$d_resfmt,$d_llmfmt,$d_hlmfmt) = @$mpr_result[21,22,23,24,25];
 
-					if(defined($res_scal) && $res_scal != $d_res_scal) { $insert_static = 1; print "why res\n";}
-					if(defined($llm_scal) && $llm_scal != $d_llm_scal) { $insert_static = 1; print "why lo\n";}
-					if(defined($hlm_scal) && $hlm_scal != $d_hlm_scal) { $insert_static = 1; print "why hil $hlm_scal vs $d_hlm_scal\n"; }
-					if(defined($hi_limit) && abs( $hi_limit - $d_hi_limit) > $EPS ) { $insert_static = 1; print "why hi lim\n";}
-					if(defined($lo_limit) && abs( $lo_limit - $d_lo_limit) > $EPS) { $insert_static = 1; print "why lo lim\n";}
+					if(defined($res_scal) && $res_scal != $d_res_scal) { $insert_static = 1; }
+					if(defined($llm_scal) && $llm_scal != $d_llm_scal) { $insert_static = 1; }
+					if(defined($hlm_scal) && $hlm_scal != $d_hlm_scal) { $insert_static = 1;  }
+					if(defined($hi_limit) && abs( $hi_limit - $d_hi_limit) > $EPS ) { $insert_static = 1; }
+					if(defined($lo_limit) && abs( $lo_limit - $d_lo_limit) > $EPS) { $insert_static = 1; }
 					for(21,22,23,24,25) {
 						if( defined($mpr_default->[$_]) && defined($mpr_field[$_]) && $mpr_default->[$_] ne $mpr_field[$_]) {
 							$insert_static = 1;
-							print "why field $_\n";
 							last;
 						}
 					}
-					#$insert_static = 1;
-					if($insert_static) {
-						#print "Default MPR" , Dumper($mpr_default), "\n";
-						#print "current MPR " , Dumper(\@mpr_field),"\n";
-					}
 				}
-
 				my $indx_arr = $mpr_field[20];
-					
 				if(defined($indx_arr) && @$indx_arr) {
-					$rtn_indx = encode_base64( pack("f<*",@$indx_arr));
+					#$rtn_indx = encode_base64( pack("f<*",@$indx_arr));
+					$rtn_indx =  pack("f<*",@$indx_arr);
 				}
 				if($insert_static) {
 					
@@ -544,15 +579,90 @@ while(my $r = $stream->()) {
 					my $inserted_id = $dbh->last_insert_id(undef,undef,'test_static_info',undef);
 					$mpr_info{$test_num,$test_txt} = $inserted_id;
 				}
-				
-			
 			}
 			$mpr_sth->execute($last_prr_id,@mpr_field[4,5,6,7,8],$encoded_array,@mpr_field[18,19],$rtn_indx,$mpr_field[12],
 				$mpr_info{$test_num,$test_txt});
-
-			
-			
+		}
 		
+		for my $ftr(@ftrs) {
+		# for FTR 
+		## only insert 
+		## test_flg and opt_flag 
+		## the rest of field if invalid, insert NULL
+		## if 1st for this tnum+vect_nam,time_set,op_code,test_txt
+			my @ftr_field = @$ftr;
+			my $tnum = $ftr_field[1];
+			my $ftr_key = join "",
+			@ftr_field[1,20,21,22,23,25,26];
+			
+			my $opt_flag = $ftr_field[5];
+			if(defined($opt_flag)){
+				$ftr_field[6] = undef if($opt_flag & 0x01);  # CYCL_CNT invalid if OPT_FLAG bit 0 = 1
+				$ftr_field[7] = undef if($opt_flag & 0x02);  #REL_VADR invalid if OPT_FLAG bit 1 = 1
+				$ftr_field[8] = undef if($opt_flag & 0x04);  # REPT_CNT invalid if OPT_FLAG bit 2 = 1
+				$ftr_field[9] = undef if($opt_flag & 0x08);  # NUM_FAIL invalid if OPT_FLAG bit 3 = 1
+				$ftr_field[10]= undef if($opt_flag & 0x10);  # XFAIL_AD invalid if OPT_FLAG bit 4 = 1
+				$ftr_field[11]= undef if($opt_flag & 0x10);  # YFAIL_AD invalid if OPT_FLAG bit 4 = 1
+				$ftr_field[12]= undef if($opt_flag & 0x20);  # VECT_OFF invalid if OPT_FLAG bit 5 = 1
+				
+				if(! defined($ftr_field[13]) || $ftr_field[13] == 0) {
+					$ftr_field[15] = $ftr_field[16] = undef;
+				}
+				else {
+					## gotta pack them back 
+					my $rtn_indx = $ftr_field[15];
+					
+					#$ftr_field[15] = encode_base64( pack("f<*",@$rtn_indx));
+					$ftr_field[15] =  pack("f<*",@$rtn_indx);
+					## rtn_stat already hex string 
+					
+				}
+				if(! defined($ftr_field[14]) || $ftr_field[14] == 0) {
+					$ftr_field[17] = $ftr_field[18] = undef;
+				}
+				else {
+					my $pgm_indx = $ftr_field[17];
+					#$ftr_field[17] = encode_base64( pack("f<*",@$pgm_indx));
+					$ftr_field[17] =  pack("f<*",@$pgm_indx);
+				}
+				
+				if(defined($ftr_field[19])) {
+					my $fail_pin = $ftr_field[19];
+					#$ftr_field[19] = encode_base64( pack("C*",@$fail_pin));
+					$ftr_field[19] =  pack("C*",@$fail_pin);
+
+				}
+				
+			}
+			
+			unless( exists($ftr_info{$ftr_key})) {
+			
+			#	insert into test_static_info ( stdf_id, test_num ,vect_nam, time_set ,
+	         #                       op_code, test_txt, prog_txt, rslt_txt)
+
+				$ftr_static_sth->execute($stdf_id, $tnum, 
+				@ftr_field[20,21,22,23,25,26]);
+				my $inserted_id = $dbh->last_insert_id(undef,undef,'test_static_info',undef);
+				$ftr_info{$ftr_key} = $inserted_id;
+
+			}else {
+				## null it out all keys 
+				for(20,21,22,23,25,26) {
+					$ftr_field[$_] = undef;
+				}
+			}
+			
+			#	insert into ftr ( part_id, test_flg, opt_flag, cycl_cnt, rel_vadr ,
+	        #          rept_cnt, num_fail, xfail_d, yfail_ad, vect_off ,
+			#		  rtn_icnt, pgm_icnt, rtn_indx, rtn_stat, pgm_indx,
+			#		  pgm_stat, fail_pin, vect_nam, time_set, op_code,
+			#		  test_txt, alarm_id, prog_txt, rslt_txt, patg_num , spin_map)
+			if(@ftr_field < 28) { $ftr_field[28] = undef;}
+			if( defined($ftr_field[28])) {
+				$ftr_field[28] = undef;
+			}
+			$ftr_sth->execute($last_prr_id, @ftr_field[4,5,6..28], $ftr_info{$ftr_key});
+			
 		}
 	}
 		
@@ -561,6 +671,3 @@ while(my $r = $stream->()) {
 $dbh->commit;
 
 
-## library design 
-## use cases are important
-## sometimes without feedback 
