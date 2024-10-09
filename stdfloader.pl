@@ -88,6 +88,23 @@ my $sdr_stmt = q {
 	)
 };
 
+my $pmr_stmt = q {
+	insert into pmr ( 
+				stdf_id, pmr_indx, chan_typ, chan_nam, phy_nam, log_nam,
+				head_num, site_num )
+		values (
+				? , ? , ? , ? , ? , ?,
+				? , ? , ?
+		)
+};
+
+my $pgr_stmt = q {
+	insert into pgr (
+				stdf_id , grp_indx, grp_nam , pmr_indx )
+			values ( ? , ? , ? , ?)
+				
+};
+
 my $wcr_stmt = q {
 	insert into wcr( id ,wafr_siz, die_ht, die_wid,
 				     wf_units, wf_flat, center_x,
@@ -95,8 +112,6 @@ my $wcr_stmt = q {
 		 values (   ? , ? , ? , ?,
 					? , ? , ? ,
 					? , ? , ? )
-		            
-
 };
 
 my $sdr_sites_stmt = q {
@@ -198,9 +213,9 @@ my $ftr_stmt = q {
 };
 
 my $ftr_static_stmt = q {
-	insert into test_static_info ( stdf_id, test_num ,vect_nam, time_set ,
+	insert into test_static_info ( stdf_id, test_num , rtn_indx, vect_nam, time_set ,
 	                                op_code, test_txt, prog_txt, rslt_txt)
-						VALUES    (   ?  , ? , ? , ?,
+						VALUES    (   ?  , ? , ? , ?, ?,
 						               ? , ? ,?  , ?
 								)
 		
@@ -227,6 +242,7 @@ my $ftr_static_sth = $dbh->prepare($ftr_static_stmt);
 my $ftr_sth        = $dbh->prepare($ftr_stmt);
 my $static_sth = $dbh->prepare($test_static_stmt);
 
+my $pmr_sth = $dbh->parepare($pmr_stmt);
 my $insert_time = localtime->strftime($SQLITE_TIMESTAMP_FMT);
 $dbh->do($insert_stdf_stmt,undef,basename($file),$insert_time,"Data::Loader");
 my $stdf_id = $dbh->last_insert_id(undef,undef,'stdf',undef);
@@ -277,8 +293,15 @@ while(my $r = $stream->()) {
 		push @{$ftr_data{$head,$site}},$r;
 	}
 	elsif($t eq "MPR" ) {
-	my ($head,$site) = @$r[2,3];
+		my ($head,$site) = @$r[2,3];
 		push @{$mpr_data{ $head,$site}},$r;
+	}
+	elsif($t eq "PMR") {
+	#stdf_id, pmr_indx, chan_typ, chan_nam, phy_nam, log_nam,
+	#			head_num, site_num )
+		my @pmr_fields = @$r;
+		shift(@pmr_fields); # remove rec name 
+		$pmr_sth->execute($stdf_id,@pmr_fields);
 	}
 	elsif($t eq "WCR" ){
 		my @wcr = @$r;
@@ -565,13 +588,13 @@ while(my $r = $stream->()) {
 						}
 					}
 				}
-				my $indx_arr = $mpr_field[20];
-				if(defined($indx_arr) && @$indx_arr) {
+				
+				if($insert_static) {
+					my $indx_arr = $mpr_field[20];
+					if(defined($indx_arr) && @$indx_arr) {
 					#$rtn_indx = encode_base64( pack("f<*",@$indx_arr));
 					$rtn_indx =  pack("f<*",@$indx_arr);
-				}
-				if($insert_static) {
-					
+					}
 					my @static_fields = ($stdf_id,$test_num,$test_txt,
 					   @mpr_field[11,13,14,15,16,17,21,23,24,25,26,27],$rtn_indx, 
 					     @mpr_field[18,19,22]);
@@ -641,13 +664,13 @@ while(my $r = $stream->()) {
 	         #                       op_code, test_txt, prog_txt, rslt_txt)
 
 				$ftr_static_sth->execute($stdf_id, $tnum, 
-				@ftr_field[20,21,22,23,25,26]);
+				@ftr_field[15,20,21,22,23,25,26]);
 				my $inserted_id = $dbh->last_insert_id(undef,undef,'test_static_info',undef);
 				$ftr_info{$ftr_key} = $inserted_id;
 
 			}else {
 				## null it out all keys 
-				for(20,21,22,23,25,26) {
+				for(15,20,21,22,23,25,26) {
 					$ftr_field[$_] = undef;
 				}
 			}
@@ -671,3 +694,6 @@ while(my $r = $stream->()) {
 $dbh->commit;
 
 
+## library design 
+## use cases are important
+## sometimes without feedback 
