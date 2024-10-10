@@ -94,7 +94,7 @@ my $pmr_stmt = q {
 				head_num, site_num )
 		values (
 				? , ? , ? , ? , ? , ?,
-				? , ? , ?
+				? , ? 
 		)
 };
 
@@ -242,7 +242,8 @@ my $ftr_static_sth = $dbh->prepare($ftr_static_stmt);
 my $ftr_sth        = $dbh->prepare($ftr_stmt);
 my $static_sth = $dbh->prepare($test_static_stmt);
 
-my $pmr_sth = $dbh->parepare($pmr_stmt);
+my $pmr_sth = $dbh->prepare($pmr_stmt);
+my $pgr_sth = $dbh->prepare($pgr_stmt);
 my $insert_time = localtime->strftime($SQLITE_TIMESTAMP_FMT);
 $dbh->do($insert_stdf_stmt,undef,basename($file),$insert_time,"Data::Loader");
 my $stdf_id = $dbh->last_insert_id(undef,undef,'stdf',undef);
@@ -302,6 +303,11 @@ while(my $r = $stream->()) {
 		my @pmr_fields = @$r;
 		shift(@pmr_fields); # remove rec name 
 		$pmr_sth->execute($stdf_id,@pmr_fields);
+	}
+	elsif($t eq "PGR") {
+		my @pgr_fields = @$r;
+		shift(@pgr_fields);
+		$pgr_sth->execute($stdf_id,@pgr_fields[0,1,3]);
 	}
 	elsif($t eq "WCR" ){
 		my @wcr = @$r;
@@ -616,7 +622,7 @@ while(my $r = $stream->()) {
 			my @ftr_field = @$ftr;
 			my $tnum = $ftr_field[1];
 			my $ftr_key = join "",
-			@ftr_field[1,20,21,22,23,25,26];
+			map { defined($_) ? $_:'' } @ftr_field[1,20,21,22,23,25,26];
 			
 			my $opt_flag = $ftr_field[5];
 			if(defined($opt_flag)){
