@@ -20,7 +20,10 @@ use File::Basename;
 
 my $SQLITE_TIMESTAMP_FMT = "%Y-%m-%d %H:%M:%S";
 
-
+if(@ARGV < 2) {
+	print "$0 <STDF> <db>\n";
+	exit;
+}
 my $file = $ARGV[0];
 my $dbfile = $ARGV[1];
 my $fh;
@@ -32,20 +35,14 @@ else {
 	open($fh,"<",$file) or die "Error opening $file:$!\n";
 	binmode($fh);
 }
-my $p = STDF::Parser->new( stdf => $fh , exclude_records => 'DTR,GDR' , omit_optional_fields => 1);
+my $p = STDF::Parser->new( stdf => $fh , exclude_records => 'DTR,GDR' , omit_optional_fields => 0);
 
 my $db = $dbfile;
-my $dsn = "dbi:Pg:dbname=$db;host=localhost";
-#my $dsn = "dbi:SQLite:dbname=$db";
+#my $dsn = "dbi:Pg:dbname=$db;host=localhost";
+my $dsn = "dbi:SQLite:dbname=$db";
 my $user = '';
 my $password = '';
 
-if($db =~ /\.db$/) {
-	$dsn = "dbi:SQLite:dbname=$db";
-	$user = '';
-	$password = '';
-
-}
 my $dbh = DBI->connect($dsn,$user,$password , 
 	{  
 	   RaiseError =>  1,
@@ -264,6 +261,8 @@ my %mpr_default_data;
 my %ftr_data;
 my %ftr_default_data;
 my %ftr_info;
+
+my $part_count = 0;
 ## populate STDF name 
 ##                        STDF   
 ###                        |
@@ -377,8 +376,12 @@ while(my $r = $stream->()) {
 	}
 	elsif($t eq "PRR") {
 		$r->[0] = $stdf_id;
+		if(defined($r->[7]) && $r->[7] == -32768)  { $r->[7] =undef; }
+		if(defined($r->[8]) && $r->[8] == -32768)  { $r->[8] = undef; }
+		if(defined($r->[6]) && $r->[6] == 65535)   { $r->[6] = undef; }
 		$r->[12] = undef if(@$r < 13);
 		$prr_sth->execute(@$r);
+		$part_count++;
 		my $last_prr_id = $dbh->last_insert_id(undef,undef,'prr',undef) ;
 		## insert the part info first 
 		## then test excuctions like PTR,FTR,MPR for that part
@@ -401,10 +404,11 @@ while(my $r = $stream->()) {
 		if(defined($ftr_ref)) {
 			@ftrs = @$ftr_ref;
 		}
-		
-		print "insert PTR for this Part $head,$site ", scalar(@ptrs),"\n";
+		if($part_count %100 ==0) { 
+		print "insert PTR for this Part $part_count $head,$site ", scalar(@ptrs),"\n";
 		print "insert MPR for this part , " ,scalar(@mprs),"\n";
 		print "insert FTR for this part , ", scalar(@ftrs),"\n";
+		}
 		### test execution records insertion 
 		## 
 		## normalise these records optional semi-static in separate table to reduce space 
@@ -429,13 +433,6 @@ while(my $r = $stream->()) {
 		#  low_spec
 		#   hi_spec 
 		
-		## for inserting text as symbol
-		## check if text already exists in symbol_txt table 
-		## if it exists in app level & table, get id 
-		##  if not exists, insert & get id
-		## insert id into app cache
-		## insert id instead of text, DONE
-		## 
 		for my $ptr(@ptrs) {
 			my @ptr_field = @$ptr;  ## treat as const, do not remove/add elements
 			
@@ -471,12 +468,6 @@ while(my $r = $stream->()) {
 			## got optional semi static data
 			## either 1st default data or this test exec contain different values from default 
 			
-			## we will consider test num, test txt as key 
-			## if not exist key , insert to semi-static table 
-			## get inserted/existing key id 
-			##  link this id with ptr table 
-			
-			
 				my $opt_flag = $ptr_field[9];
 				my $res_scal = ($opt_flag & 0x01 ) ? undef : $ptr_field[10];
 				my $lo_spec  = ($opt_flag & 0x04 ) ? undef : $ptr_field[19];
@@ -493,21 +484,20 @@ while(my $r = $stream->()) {
 				@ptr_field[10,11,12,13,14,19,20]= ($res_scal,$llm_scal,$hlm_scal,
 				                                    $lo_limit,$hi_limit,$lo_spec,$hi_spec);
 				my $insert_static_data = 0;
-				unless( exists($ptr_default_data{$test_num,$test_txt})) {
-					if(!defined($res_scal)) {
-						# something wrong here
-						#print Dumper(\@ptr_field),"\n";
-						#die "1st PTR default value no RES_SCAL defined\n";
-					}
+				my $default_exists = exists($ptr_default_data{$test_num,$test_txt}) || exists($ptr_default_data{$test_num});
+
+				unless( $default_exists )  {
 					## wanna make sure all limits are set properly here 
 					$insert_static_data = 1;
-					$ptr_default_data{$test_num,$test_txt} = [@ptr_field];
+					my $def_ptr_fields = [@ptr_field];
+					print "First time for $test_num, $test_txt \n";
+					print Dumper(\@ptr_field),"\n";
+					$ptr_default_data{$test_num,$test_txt} = $def_ptr_fields;
+					$ptr_default_data{$test_num} = $def_ptr_fields;
 					
 				} else {
-					# let's just assume we're here because of 
-					# different in limits 
-					# parser already also taking care for same opt_flag ... fields 
-					my $defaults = $ptr_default_data{$test_num,$test_txt};
+					my $defaults = exists($ptr_default_data{$test_num,$test_txt}) ? $ptr_default_data{$test_num,$test_txt} : 
+								$ptr_default_data{$test_num};
 					my ($d_lo_limit,$d_lo_scal,$d_hi_limit,$d_hi_scal) = @$defaults[13,11,14,12];
 					my $same_lo_limit = 0;
 					my $same_hi_limit = 0; 
@@ -524,17 +514,18 @@ while(my $r = $stream->()) {
 				}
 				if($insert_static_data) {
 					my @static_fields = ($stdf_id,$test_num,@ptr_field[7,8,10..20 ],undef,undef,undef,undef);
-					#$dbh->do($test_static_stmt,undef,@static_fields);
 					$static_sth->execute(@static_fields);
 					my $inserted_id = $dbh->last_insert_id(undef,undef,'test_static_info',undef);
 					 $ptr_info{$test_num,$test_txt} = $inserted_id;
+					 $ptr_info{$test_num} = $inserted_id;
 					print "insert default for $test_num|$test_txt|$inserted_id \n";
 					$dynamic_low_limit = $lo_limit;
 					$dynamic_hi_limit  = $hi_limit;
 
 				}
 			}
-			$ptr_sth->execute($last_prr_id,@ptr_field[4,5,6,9],$dynamic_low_limit,$dynamic_hi_limit,$ptr_info{$test_num,$test_txt});
+			$ptr_sth->execute($last_prr_id,@ptr_field[4,5,6,9],$dynamic_low_limit,$dynamic_hi_limit,
+			exists($ptr_info{$test_num,$test_txt}) ? $ptr_info{$test_num,$test_txt}: $ptr_info{$test_num});
 			
 		}
 		
@@ -545,8 +536,8 @@ while(my $r = $stream->()) {
 			my $rtn_result = $mpr_field[9]; #could be empty ; type array ref
 			my $encoded_array ;
 			if(defined($rtn_result) && @$rtn_result) {
-				#$encoded_array = encode_base64( pack("f<*",@$rtn_result) );
-				$encoded_array =  pack("f<*",@$rtn_result) ;
+				$encoded_array = encode_base64( pack("f<*",@$rtn_result) );
+				#$encoded_array =  pack("f<*",@$rtn_result) ;
 			}
 			my $rtn_indx;
 
@@ -566,17 +557,33 @@ while(my $r = $stream->()) {
 					$hlm_scal = $mpr_field[15];
 				}
 				my $insert_static = 0;
-				unless(exists($mpr_info{$test_num,$test_txt})) {
+				my $default_exists = exists($mpr_info{$test_num,$test_txt}) && exists($mpr_info{$test_num});
+				unless( $default_exists) {
 				# first default MPR 
 					$insert_static = 1;
-					$mpr_default_data{$test_num,$test_txt} = [@mpr_field];
+					my $def_mpr = [@mpr_field];
+					$mpr_default_data{$test_num,$test_txt} = $def_mpr;
+					$mpr_default_data{$test_num} = $def_mpr;
 				}
 				else {
 					# compare this with 1st MPR values 
 					## compare ON 
 					#  RES_SCAL, LLM_SCAL, HLM_SCAL 
 					#  LO_LIMIT, HI_LIMIT , START_IN,INCR_IN, UNITS 
-					my $mpr_default = $mpr_default_data{$test_num,$test_txt};
+
+					my $mpr_default;
+					if( exists($mpr_default_data{$test_num,$test_txt}) ) {
+						$mpr_default = $mpr_default_data{$test_num,$test_txt};
+					}
+					elsif(exists($mpr_default_data{$test_num})) {
+						$mpr_default = $mpr_default_data{$test_num};
+					}
+					else {
+
+						# what could be the reason?
+						goto done_mpr_default;
+					}
+					
 					my ($d_res_scal,$d_llm_scal,$d_hlm_scal) = @$mpr_default[13,14,15];
 					my ($d_lo_limit,$d_hi_limit) = @$mpr_default[16,17];
 					#print "NOT FIRST MPR!\n";
@@ -594,12 +601,12 @@ while(my $r = $stream->()) {
 						}
 					}
 				}
-				
+				done_mpr_default:
 				if($insert_static) {
 					my $indx_arr = $mpr_field[20];
 					if(defined($indx_arr) && @$indx_arr) {
-					#$rtn_indx = encode_base64( pack("f<*",@$indx_arr));
-					$rtn_indx =  pack("f<*",@$indx_arr);
+					$rtn_indx = encode_base64( pack("f<*",@$indx_arr));
+					#$rtn_indx =  pack("f<*",@$indx_arr);
 					}
 					my @static_fields = ($stdf_id,$test_num,$test_txt,
 					   @mpr_field[11,13,14,15,16,17,21,23,24,25,26,27],$rtn_indx, 
@@ -607,10 +614,11 @@ while(my $r = $stream->()) {
 					$static_sth->execute(@static_fields);
 					my $inserted_id = $dbh->last_insert_id(undef,undef,'test_static_info',undef);
 					$mpr_info{$test_num,$test_txt} = $inserted_id;
+					$mpr_info{$test_num} = $inserted_id;
 				}
 			}
 			$mpr_sth->execute($last_prr_id,@mpr_field[4,5,6,7,8],$encoded_array,@mpr_field[18,19],$rtn_indx,$mpr_field[12],
-				$mpr_info{$test_num,$test_txt});
+				exists($mpr_info{$test_num,$test_txt}) ? $mpr_info{$test_num,$test_txt} : $mpr_info{$test_num}   );
 		}
 		
 		for my $ftr(@ftrs) {
@@ -641,8 +649,8 @@ while(my $r = $stream->()) {
 					## gotta pack them back 
 					my $rtn_indx = $ftr_field[15];
 					
-					#$ftr_field[15] = encode_base64( pack("f<*",@$rtn_indx));
-					$ftr_field[15] =  pack("f<*",@$rtn_indx);
+					$ftr_field[15] = encode_base64( pack("f<*",@$rtn_indx));
+					#$ftr_field[15] =  pack("f<*",@$rtn_indx);
 					## rtn_stat already hex string 
 					
 				}
@@ -651,14 +659,14 @@ while(my $r = $stream->()) {
 				}
 				else {
 					my $pgm_indx = $ftr_field[17];
-					#$ftr_field[17] = encode_base64( pack("f<*",@$pgm_indx));
-					$ftr_field[17] =  pack("f<*",@$pgm_indx);
+					$ftr_field[17] = encode_base64( pack("f<*",@$pgm_indx));
+					#$ftr_field[17] =  pack("f<*",@$pgm_indx);
 				}
 				
 				if(defined($ftr_field[19])) {
 					my $fail_pin = $ftr_field[19];
-					#$ftr_field[19] = encode_base64( pack("C*",@$fail_pin));
-					$ftr_field[19] =  pack("C*",@$fail_pin);
+					$ftr_field[19] = encode_base64( pack("C*",@$fail_pin));
+					#$ftr_field[19] =  pack("C*",@$fail_pin);
 
 				}
 				
@@ -698,8 +706,3 @@ while(my $r = $stream->()) {
 }
 
 $dbh->commit;
-
-
-## library design 
-## use cases are important
-## sometimes without feedback 
